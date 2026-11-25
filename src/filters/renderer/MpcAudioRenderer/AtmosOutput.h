@@ -1,4 +1,4 @@
-﻿/*
+/*
  * AtmosOutput — MPC-BE Atmos Edition
  *
  * Decodes TrueHD (Atmos or not) received packed as IEC 61937 / MAT, and E-AC-3
@@ -35,6 +35,10 @@
 #include <vector>
 #include "SyncTools.h"
 
+struct AVCodecContext;
+struct AVFrame;
+struct AVPacket;
+
 // Diagnostic log: SpatialClock.log, next to the module (.ax).
 void AtmosLog(const wchar_t* fmt, ...);
 // Diagnostic log on/off (renderer option, off by default).
@@ -66,6 +70,7 @@ public:
 	void Flush();                     // clears the queue and resets the decoder
 	void SetRunning(bool bRunning);   // false: render silence
 	void SetVolume(float volume);     // global linear gain
+	void SetEac3Gain(float dB);        // level trim for E-AC-3 Atmos (objects) only
 
 	// Playback speed (1.0 = normal), applied by resampling.
 	void   SetSpeed(double speed);
@@ -122,6 +127,17 @@ private:
 	float Sample(unsigned c, int64_t index) const; // input sample (0 outside the buffer)
 	const Segment* SegmentAt(uint64_t index) const;
 	void  ResetBuffers();
+
+	// E-AC-3 without Atmos objects is decoded by FFmpeg (the OpenJOC core decoder does not
+	// support the usual coupling / spectral extension tools). One IEC 61937 burst in, frames out.
+	bool  FFOpen();
+	void  FFClose();
+	void  FFDecodeEac3(const BYTE* pData, long size, std::vector<std::unique_ptr<Frame>>& out);
+	AVCodecContext* m_pFFCtx = nullptr;
+	AVFrame*        m_pFFFrame = nullptr;
+	AVPacket*       m_pFFPkt = nullptr;
+	bool            m_bFFFailed = false;
+	std::atomic<float> m_fEac3Gain{1.0f};
 
 	ISpatialAudioClient*             m_pClient = nullptr;
 	ISpatialAudioObjectRenderStream* m_pStream = nullptr;
