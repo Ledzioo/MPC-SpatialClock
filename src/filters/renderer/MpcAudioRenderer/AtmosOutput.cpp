@@ -15,6 +15,15 @@
 #include <cstdarg>
 #include <cstdio>
 
+#pragma warning(push)
+#pragma warning(disable: 4005)
+extern "C" {
+	#include <ExtLib/ffmpeg/libavcodec/avcodec.h>
+	#include <ExtLib/ffmpeg/libavutil/channel_layout.h>
+	#include <ExtLib/ffmpeg/libavutil/frame.h>
+}
+#pragma warning(pop)
+
 // ---- thdatmos.dll ----
 namespace
 {
@@ -266,11 +275,156 @@ void CAtmosOutput::Close()
 		g_thd.close(m_pDecoder);
 		m_pDecoder = nullptr;
 	}
+	FFClose();
+	m_bFFFailed = false;
 	std::lock_guard<std::mutex> lock(m_mutex);
 	m_queue.clear();
 	m_nQueuedSamples = 0;
 	ResetBuffers();
 	m_bHaveState = false;
+}
+
+static CAtmosOutput::Element SpeakerElement(DWORD speaker, bool bSurroundAtSide);
+
+// IEC 61937 E-AC-3 burst -> raw E-AC-3 (same unpacking as thdatmos: 16-bit words, byte-swapped).
+static bool UnpackEac3Burst(const BYTE* b, size_t size, std::vector<uint8_t>& out)
+{
+	if (size < 8) {
+		return false;
+	}
+	auto w = [&](size_t i) { return (uint16_t)(b[i] | (b[i + 1] << 8)); };
+	if (w(0) != 0xF872 || w(2) != 0x4E1F || (w(4) & 0x7F) != 0x15) {
+		return false;
+	}
+	const size_t avail = size - 8;
+	const size_t len   = std::min<size_t>(w(6), avail);
+	const size_t even  = std::min<size_t>(len + 1, avail) & ~(size_t)1;
+	out.assign(even, 0);
+	for (size_t i = 0; i + 1 < even; i += 2) {
+		out[i]     = b[8 + i + 1];
+		out[i + 1] = b[8 + i];
+	}
+	out.resize(std::min(len, even));
+	// Packers that do not swap: the syncword then reads 77 0B.
+	if (out.size() >= 2 && out[0] == 0x77 && out[1] == 0x0B) {
+		for (size_t i = 0; i + 1 < out.size(); i += 2) {
+			std::swap(out[i], out[i + 1]);
+		}
+	}
+	return !out.empty();
+}
+
+bool CAtmosOutput::FFOpen()
+{
+	const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_EAC3);
+	if (!codec) {
+		AtmosLog(L"FFmpeg: E-AC-3 decoder not found");
+		m_bFFFailed = true;
+		return false;
+	}
+	m_pFFCtx   = avcodec_alloc_context3(codec);
+	m_pFFFrame = av_frame_alloc();
+	m_pFFPkt   = av_packet_alloc();
+	if (!m_pFFCtx || !m_pFFFrame || !m_pFFPkt || avcodec_open2(m_pFFCtx, codec, nullptr) < 0) {
+		AtmosLog(L"FFmpeg: E-AC-3 decoder initialization failed");
+		FFClose();
+		m_bFFFailed = true;
+		return false;
+	}
+	AtmosLog(L"FFmpeg: E-AC-3 decoder opened");
+	return true;
+}
+
+void CAtmosOutput::FFClose()
+{
+	if (m_pFFCtx) {
+		avcodec_free_context(&m_pFFCtx);
+	}
+	if (m_pFFFrame) {
+		av_frame_free(&m_pFFFrame);
+	}
+	if (m_pFFPkt) {
+		av_packet_free(&m_pFFPkt);
+	}
+}
+
+void CAtmosOutput::FFDecodeEac3(const BYTE* pData, long size, std::vector<std::unique_ptr<Frame>>& out)
+{
+	std::vector<uint8_t> es;
+	if (!UnpackEac3Burst(pData, (size_t)size, es)) {
+		return;
+	}
+	if (!m_pFFCtx && (m_bFFFailed || !FFOpen())) {
+		return;
+	}
+
+	const size_t esSize = es.size();
+	es.resize(esSize + AV_INPUT_BUFFER_PADDING_SIZE, 0);
+	m_pFFPkt->data = es.data();
+	m_pFFPkt->size = (int)esSize;
+	const int ret = avcodec_send_packet(m_pFFCtx, m_pFFPkt);
+	m_pFFPkt->data = nullptr;
+	m_pFFPkt->size = 0;
+	if (ret < 0 && ret != AVERROR(EAGAIN)) {
+		static int s_errLogged = 0;
+		if (s_errLogged++ < 5) {
+			AtmosLog(L"FFmpeg: avcodec_send_packet failed (%d)", ret);
+		}
+	}
+
+	while (avcodec_receive_frame(m_pFFCtx, m_pFFFrame) >= 0) {
+		const AVFrame* f = m_pFFFrame;
+		const int nbCh   = f->ch_layout.nb_channels;
+		const uint32_t nch = (uint32_t)std::min(nbCh, 16);
+		const bool bFloat  = (f->format == AV_SAMPLE_FMT_FLTP || f->format == AV_SAMPLE_FMT_FLT);
+		if (!nch || f->nb_samples <= 0 || !bFloat) {
+			static int s_fmtLogged = 0;
+			if (!bFloat && s_fmtLogged++ < 3) {
+				AtmosLog(L"FFmpeg: unexpected sample format %d", f->format);
+			}
+			av_frame_unref(m_pFFFrame);
+			continue;
+		}
+		const bool bPlanar = (f->format == AV_SAMPLE_FMT_FLTP);
+
+		// Fixed position of each channel.
+		Element elements[16] = {};
+		int chan[16];
+		DWORD mask = 0;
+		for (uint32_t c = 0; c < nch; c++) {
+			chan[c] = (int)av_channel_layout_channel_from_index(&f->ch_layout, c);
+			if (chan[c] >= 0 && chan[c] <= 17) { // AVChannel 0..17 = WAVE speaker bits 0..17
+				mask |= 1u << chan[c];
+			}
+		}
+		const bool bSurroundAtSide = (mask & (SPEAKER_BACK_LEFT | SPEAKER_SIDE_LEFT)) == SPEAKER_BACK_LEFT; // 5.1 "back"
+		for (uint32_t c = 0; c < nch; c++) {
+			if (chan[c] >= 0 && chan[c] <= 17) {
+				elements[c] = SpeakerElement(1u << chan[c], bSurroundAtSide);
+			}
+		}
+
+		const uint32_t total = (uint32_t)f->nb_samples;
+		for (uint32_t done = 0; done < total;) {
+			const uint32_t k = std::min<uint32_t>(total - done, 160);
+			auto fr = std::make_unique<Frame>();
+			fr->sample_pos  = 0;
+			fr->samples     = k;
+			fr->channels    = nch;
+			fr->sample_rate = (uint32_t)f->sample_rate;
+			memcpy(fr->elements, elements, sizeof(elements));
+			for (uint32_t s = 0; s < k; s++) {
+				for (uint32_t c = 0; c < nch; c++) {
+					fr->pcm[s][c] = bPlanar
+						? ((const float*)f->extended_data[c])[done + s]
+						: ((const float*)f->data[0])[(size_t)(done + s) * nbCh + c];
+				}
+			}
+			out.push_back(std::move(fr));
+			done += k;
+		}
+		av_frame_unref(m_pFFFrame);
+	}
 }
 
 HRESULT CAtmosOutput::Receive(const BYTE* pData, long size, REFERENCE_TIME rtStart, bool bDiscontinuity,
@@ -297,16 +451,47 @@ HRESULT CAtmosOutput::Receive(const BYTE* pData, long size, REFERENCE_TIME rtSta
 		const uint32_t info = g_thd.info(m_pDecoder); // read on this thread only (the decoder is not shared)
 		if (info != m_nStreamInfo) {
 			AtmosLog(L"Receive: stream info 0x%x (bit0 TrueHD, bit1 E-AC-3, bit2 Atmos objects)", info);
+			if (info & 2) {
+				AtmosLog((info & 4) ? L"Receive: E-AC-3 with Atmos objects -> thdatmos (OpenJOC), trim %.1f dB"
+									: L"Receive: E-AC-3 without Atmos objects -> FFmpeg decoder",
+						 20.0 * log10((double)m_fEac3Gain.load()));
+			}
 		}
 		m_nStreamInfo = info;
 	}
 
 	// Diagnostics: how many bursts went in and how many frames came out.
-	static uint64_t s_bursts = 0, s_frames = 0, s_peakLogged = 0;
+	static uint64_t s_bursts = 0, s_frames = 0;
 	s_bursts++;
 
-	auto frame = std::make_unique<Frame>();
-	while (g_thd.pull(m_pDecoder, frame.get()) == 1) {
+	const uint32_t info = m_nStreamInfo.load();
+	const bool bFFmpeg     = (info & 2) && !(info & 4); // E-AC-3 without Atmos objects
+	const bool bEac3Atmos  = (info & 2) && (info & 4);
+	const float fGain      = bEac3Atmos ? m_fEac3Gain.load() : 1.0f;
+
+	std::vector<std::unique_ptr<Frame>> frames;
+	{
+		auto f = std::make_unique<Frame>();
+		while (g_thd.pull(m_pDecoder, f.get()) == 1) {
+			if (bFFmpeg) {
+				continue; // the thdatmos core decoder output is not used, FFmpeg decodes this stream
+			}
+			if (fGain != 1.0f) {
+				for (uint32_t s = 0; s < f->samples && s < 160; s++) {
+					for (uint32_t c = 0; c < f->channels && c < 16; c++) {
+						f->pcm[s][c] *= fGain;
+					}
+				}
+			}
+			frames.push_back(std::move(f));
+			f = std::make_unique<Frame>();
+		}
+	}
+	if (bFFmpeg) {
+		FFDecodeEac3(pData, size, frames);
+	}
+
+	for (auto& frame : frames) {
 		if (!frame->samples) {
 			continue;
 		}
@@ -358,7 +543,7 @@ HRESULT CAtmosOutput::Receive(const BYTE* pData, long size, REFERENCE_TIME rtSta
 
 	if ((s_bursts == 50 || s_bursts == 500) && s_frames == 0) {
 		const char* err = g_thd.error ? g_thd.error(m_pDecoder) : nullptr;
-		AtmosLog(L"Receive: %llu bursts pushed, decoder has produced no frames; last decoder error: %S", (unsigned long long)s_bursts, (err && *err) ? err : "(none)");
+		AtmosLog(L"Receive: %llu bursts pushed, no frames produced; last decoder error: %S", (unsigned long long)s_bursts, (err && *err) ? err : "(none)");
 	}
 
 	return S_OK;
@@ -531,6 +716,9 @@ void CAtmosOutput::Flush()
 	if (m_pDecoder) {
 		g_thd.reset(m_pDecoder);
 	}
+	if (m_pFFCtx) {
+		avcodec_flush_buffers(m_pFFCtx);
+	}
 	SetEvent(m_hSpaceEvent);
 }
 
@@ -549,6 +737,12 @@ void CAtmosOutput::SetVolume(float volume)
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	m_fVolume = volume;
+}
+
+void CAtmosOutput::SetEac3Gain(float dB)
+{
+	dB = std::min(std::max(dB, -30.0f), 30.0f);
+	m_fEac3Gain = std::pow(10.0f, dB / 20.0f);
 }
 
 void CAtmosOutput::SetSpeed(double speed)
