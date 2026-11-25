@@ -145,6 +145,8 @@ impl Ctx {
 
     pub fn new() -> Self {
         let mut required = [false; MAX_PRESENTATIONS];
+        required[0] = true; // 2 channels (stereo-only tracks)
+        required[1] = true; // 6 channels (5.1 tracks have no 8-channel presentation)
         required[2] = true; // 8 channels (non-Atmos fallback)
         required[3] = true; // Atmos (16 elements)
         let mut parser = Parser::default();
@@ -302,7 +304,8 @@ impl Ctx {
             };
             match self.decoder.decode_presentations(&au, &self.required) {
                 Ok(mut res) => {
-                    let d = res[3].take().or_else(|| res[2].take());
+                    // Richest presentation present: Atmos, then 7.1, 5.1, stereo.
+                    let d = res[3].take().or_else(|| res[2].take()).or_else(|| res[1].take()).or_else(|| res[0].take());
                     if let Some(d) = d {
                         self.handle(d);
                     }
