@@ -27,3 +27,7 @@
 #endif
 
 #pragma comment(lib, "winmm.lib")
+
+// FFmpeg (E-AC-3 decoder) is linked as a whole, as in MpaDecFilter.
+#pragma comment(lib, "libdav1d.a")
+#pragma comment(lib, "fdk-aac.lib")
