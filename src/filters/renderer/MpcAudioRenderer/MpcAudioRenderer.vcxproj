@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup Label="Globals">
     <ProjectGuid>{D0620EF4-1313-40D5-9069-A82F6FE26994}</ProjectGuid>
@@ -144,6 +144,18 @@
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)src\filters\filters\Filters.vcxproj">
       <Project>{273b3149-3192-4b75-a791-470320b90812}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)src\ExtLib\zlib\zlib.vcxproj">
+      <Project>{2fcd4b66-9cf9-4c8f-bc70-37cd20002d49}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)src\ExtLib\speex\speex.vcxproj">
+      <Project>{f4c233d1-297b-4b6b-bd63-a7d38f88aa83}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\ExtLib\uavs3d\uavs3d.vcxproj">
+      <Project>{1cdbe640-bb75-422c-b63a-8c70c4d48bea}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\ExtLib\vvdec.vcxproj">
+      <Project>{a5b58721-0f63-4410-9598-880ebda78c53}</Project>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
