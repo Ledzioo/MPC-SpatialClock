@@ -24,6 +24,7 @@ namespace
 	typedef int   (*PFN_thd_pull)(void*, CAtmosOutput::Frame*);
 	typedef void  (*PFN_thd_close)(void*);
 	typedef uint32_t (*PFN_thd_info)(const void*);
+	typedef const char* (*PFN_thd_error)(const void*);
 
 	static int s_moduleAnchor = 0;
 
@@ -36,6 +37,7 @@ namespace
 		PFN_thd_pull          pull = nullptr;
 		PFN_thd_close         close = nullptr;
 		PFN_thd_info          info = nullptr; // optional
+		PFN_thd_error         error = nullptr; // optional (diagnostics)
 
 		bool Load() {
 			if (tried) {
@@ -62,6 +64,7 @@ namespace
 			pull   = (PFN_thd_pull)GetProcAddress(hLib, "thd_pull");
 			close  = (PFN_thd_close)GetProcAddress(hLib, "thd_close");
 			info   = (PFN_thd_info)GetProcAddress(hLib, "thd_info");
+			error  = (PFN_thd_error)GetProcAddress(hLib, "thd_error");
 			if (!create || !reset || !push || !pull || !close) {
 				AtmosLog(L"thdatmos.dll: missing exports");
 				FreeLibrary(hLib);
@@ -354,7 +357,8 @@ HRESULT CAtmosOutput::Receive(const BYTE* pData, long size, REFERENCE_TIME rtSta
 	}
 
 	if ((s_bursts == 50 || s_bursts == 500) && s_frames == 0) {
-		AtmosLog(L"Receive: %llu bursts pushed, decoder has produced no frames", (unsigned long long)s_bursts);
+		const char* err = g_thd.error ? g_thd.error(m_pDecoder) : nullptr;
+		AtmosLog(L"Receive: %llu bursts pushed, decoder has produced no frames; last decoder error: %S", (unsigned long long)s_bursts, (err && *err) ? err : "(none)");
 	}
 
 	return S_OK;
