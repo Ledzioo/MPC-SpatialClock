@@ -90,6 +90,7 @@ class __declspec(uuid("601D2A2B-9CDE-40bd-8650-0485E3522727"))
 	BOOL              m_bVideoSync = TRUE;    // option: ReClock-style display sync
 	BOOL              m_bHeightObjects = TRUE; // option: PCM with height channels -> objects
 	BOOL              m_bEac3Objects = TRUE;  // option: E-AC-3 (DD+, DD+ Atmos) -> objects
+	int               m_nEac3GainDb10 = 0;    // option (registry only): E-AC-3 Atmos level trim, tenths of dB
 	BOOL              m_bDiagnosticLog = FALSE; // option: write SpatialClock.log
 	bool              IsEac3Bitstream(const WAVEFORMATEX* pwfx) const;
 	bool              IsObjectBitstream(const WAVEFORMATEX* pwfx) const;
