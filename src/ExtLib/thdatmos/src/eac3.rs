@@ -56,6 +56,10 @@ pub fn unpack_iec61937(burst: &[u8], out: &mut Vec<u8>) -> bool {
     true
 }
 
+/// The OpenJOC core decoder does not support the coupling / spectral extension tools of
+/// ordinary E-AC-3: the renderer decodes E-AC-3 without Atmos with FFmpeg instead.
+const USE_CORE_FALLBACK: bool = false;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Unknown,
@@ -268,6 +272,9 @@ impl Eac3Decoder {
     }
 
     fn decode_core(&mut self, au: &[u8], out: &mut Vec<Block>) {
+        if !USE_CORE_FALLBACK {
+            return;
+        }
         let frames = match index_syncframes(au) {
             Ok(f) => f,
             Err(e) => {
