@@ -70,6 +70,8 @@ pub struct Eac3Decoder {
     core: JocAccessUnitPcmDecoder,
     dither: Vec<f64>,
     first_after_reset: bool,
+    /// Last decode problem, for diagnostics (read through thd_error).
+    pub last_error: Option<String>,
 }
 
 impl Default for Eac3Decoder {
@@ -97,6 +99,7 @@ impl Eac3Decoder {
             core: JocAccessUnitPcmDecoder::new(),
             dither,
             first_after_reset: true,
+            last_error: None,
         }
     }
 
@@ -250,6 +253,9 @@ impl Eac3Decoder {
                     Err(e) => {
                         // A session stops at its first error: a new one is created for the next unit.
                         self.session = None;
+                        if self.mode == Mode::Unknown {
+                            self.last_error = Some(format!("OpenJOC push_packet: {e:?}"));
+                        }
                         if self.mode == Mode::Unknown && matches!(e, OpenJocError::InvalidPacket(_)) {
                             self.mode = Mode::Core; // no Atmos in this stream
                         }
@@ -262,12 +268,28 @@ impl Eac3Decoder {
     }
 
     fn decode_core(&mut self, au: &[u8], out: &mut Vec<Block>) {
-        let Ok(frames) = index_syncframes(au) else { return };
-        let Ok(units) = group_access_units(&frames) else { return };
+        let frames = match index_syncframes(au) {
+            Ok(f) => f,
+            Err(e) => {
+                self.last_error = Some(format!("core: index_syncframes: {e:?}"));
+                return;
+            }
+        };
+        let units = match group_access_units(&frames) {
+            Ok(u) => u,
+            Err(e) => {
+                self.last_error = Some(format!("core: group_access_units: {e:?}"));
+                return;
+            }
+        };
         for unit in units {
-            let Ok(pcm) = self.core.decode(au, &frames, unit, &self.dither) else {
-                self.core.reset();
-                continue;
+            let pcm = match self.core.decode(au, &frames, unit, &self.dither) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.last_error = Some(format!("core: decode: {e:?}"));
+                    self.core.reset();
+                    continue;
+                }
             };
             let n = pcm.samples as usize;
             let mut channels: Vec<(&Vec<f64>, ThdElement)> = pcm
