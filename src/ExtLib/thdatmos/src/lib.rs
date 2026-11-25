@@ -211,6 +211,9 @@ impl Ctx {
             for b in blocks {
                 self.queue_block(&b);
             }
+            if let Some(e) = self.eac3.last_error.take() {
+                self.last_error = CString::new(e).ok();
+            }
             return true;
         }
         false
