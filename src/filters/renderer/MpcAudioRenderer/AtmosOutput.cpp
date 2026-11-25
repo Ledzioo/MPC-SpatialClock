@@ -1,4 +1,4 @@
-﻿/*
+/*
  * AtmosOutput — MPC-BE Atmos Edition (see AtmosOutput.h)
  *
  * This program is free software: you can redistribute it and/or modify
@@ -291,14 +291,37 @@ HRESULT CAtmosOutput::Receive(const BYTE* pData, long size, REFERENCE_TIME rtSta
 	}
 
 	if (g_thd.info) {
-		m_nStreamInfo = g_thd.info(m_pDecoder); // read on this thread only (the decoder is not shared)
+		const uint32_t info = g_thd.info(m_pDecoder); // read on this thread only (the decoder is not shared)
+		if (info != m_nStreamInfo) {
+			AtmosLog(L"Receive: stream info 0x%x (bit0 TrueHD, bit1 E-AC-3, bit2 Atmos objects)", info);
+		}
+		m_nStreamInfo = info;
 	}
+
+	// Diagnostics: how many bursts went in and how many frames came out.
+	static uint64_t s_bursts = 0, s_frames = 0, s_peakLogged = 0;
+	s_bursts++;
 
 	auto frame = std::make_unique<Frame>();
 	while (g_thd.pull(m_pDecoder, frame.get()) == 1) {
 		if (!frame->samples) {
 			continue;
 		}
+		if (s_frames < 5 || (s_frames % 2000) == 0) {
+			float peak = 0.0f;
+			for (uint32_t s = 0; s < frame->samples; s++) {
+				for (uint32_t c = 0; c < frame->channels && c < 16; c++) {
+					peak = std::max(peak, std::fabs(frame->pcm[s][c]));
+				}
+			}
+			int active = 0;
+			for (uint32_t c = 0; c < frame->channels && c < 16; c++) {
+				active += frame->elements[c].active ? 1 : 0;
+			}
+			AtmosLog(L"Receive: frame #%llu (burst #%llu): %u samples, %u ch, %u Hz, peak %.4f, %d active elements",
+					 (unsigned long long)s_frames, (unsigned long long)s_bursts, frame->samples, frame->channels, frame->sample_rate, peak, active);
+		}
+		s_frames++;
 		if (frame->sample_rate != SAMPLE_RATE) {
 			if (!frame->sample_rate || frame->sample_rate > 8 * SAMPLE_RATE) {
 				continue;
@@ -328,6 +351,10 @@ HRESULT CAtmosOutput::Receive(const BYTE* pData, long size, REFERENCE_TIME rtSta
 			}
 		}
 		QueueFrame(frame, rtStart, bDiscontinuity);
+	}
+
+	if ((s_bursts == 50 || s_bursts == 500) && s_frames == 0) {
+		AtmosLog(L"Receive: %llu bursts pushed, decoder has produced no frames", (unsigned long long)s_bursts);
 	}
 
 	return S_OK;
