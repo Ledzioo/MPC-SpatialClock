@@ -52,6 +52,7 @@
 #define OPT_VideoSync               L"VideoSync"
 #define OPT_HeightObjects           L"HeightObjects"
 #define OPT_Eac3Objects             L"Eac3Objects"
+#define OPT_Eac3GainDb              L"Eac3GainDb" // tenths of dB (registry only), trim for E-AC-3 Atmos
 #define OPT_DiagnosticLog           L"DiagnosticLog"
 // TODO: rename option values
 
@@ -285,6 +286,9 @@ CMpcAudioRenderer::CMpcAudioRenderer(LPUNKNOWN punk, HRESULT *phr)
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_Eac3Objects, dw)) {
 			m_bEac3Objects = !!dw;
 		}
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_Eac3GainDb, dw)) {
+			m_nEac3GainDb10 = (int)dw;
+		}
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DiagnosticLog, dw)) {
 			m_bDiagnosticLog = !!dw;
 		}
@@ -307,6 +311,7 @@ CMpcAudioRenderer::CMpcAudioRenderer(LPUNKNOWN punk, HRESULT *phr)
 	profile.ReadInt(OPT_SECTION_AudRend, OPT_VideoSync, m_bVideoSync);
 	profile.ReadInt(OPT_SECTION_AudRend, OPT_HeightObjects, m_bHeightObjects);
 	profile.ReadInt(OPT_SECTION_AudRend, OPT_Eac3Objects, m_bEac3Objects);
+	profile.ReadInt(OPT_SECTION_AudRend, OPT_Eac3GainDb, m_nEac3GainDb10);
 	profile.ReadInt(OPT_SECTION_AudRend, OPT_DiagnosticLog, m_bDiagnosticLog);
 #endif
 
@@ -633,6 +638,7 @@ HRESULT CMpcAudioRenderer::SetMediaType(const CMediaType *pmt)
 			m_bAtmos = true;
 			m_bSpatialPcm = bHeights;
 			m_Atmos.SetVolume((float)m_dVolumeFactor);
+			m_Atmos.SetEac3Gain(m_nEac3GainDb10 / 10.0f);
 			CopyWaveFormat(pwf, &m_pWaveFormatExInput);
 			m_BitstreamMode = !bTrueHD ? BITSTREAM_NONE : IsEac3Bitstream(pwf) ? BITSTREAM_EAC3 : BITSTREAM_TRUEHD;
 			if (m_filterState == State_Running) {
