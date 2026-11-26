@@ -8,6 +8,7 @@ Audio renderer for MPC video players (fork of MPC Audio Renderer): bitstreams an
 2. Right-click `Installer.bat` → Run as administrator.
 3. MPC: Options → Audio → Audio renderer: "MPC SpatialClock".
 4. Audio decoder: TrueHD and E-AC-3 pass-through ON, DTS and AC-3 OFF.
+
 Note: For MPC-HC with LAV audio decoder, disable PCM fallback when bitstreaming is unavailable.
 
 To remove it: `Uninstaller.bat`, as administrator.
