@@ -13,4 +13,4 @@ Audio renderer for MPC video players (fork of MPC Audio Renderer): bitstreams an
 
 To remove it: `Uninstaller.bat`, as administrator.
 
-Windows 10/11 x64. Source: this repository (GPL-3.0). Includes OpenJOC (Apache-2.0).
+Windows 10/11 x64. Source: this repository (GPL-3.0). Includes OpenJOC (Apache-2.0) and FFmpeg.
