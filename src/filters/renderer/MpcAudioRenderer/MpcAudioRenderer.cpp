@@ -499,6 +499,11 @@ HRESULT	CMpcAudioRenderer::CheckMediaType(const CMediaType *pmt)
 			}
 
 			hr = m_pAudioClient->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, pWaveFormatEx, nullptr);
+			if (hr != S_OK && IsObjectBitstream(pWaveFormatEx) && CAtmosOutput::LibraryAvailable()) {
+				AtmosLog(L"CheckMediaType: %s bitstream not supported by the device (0x%08x), accepted for PCM decoding",
+						 IsEac3Bitstream(pWaveFormatEx) ? L"E-AC-3" : L"TrueHD", hr);
+				hr = S_OK;
+			}
 		}
 	}
 
@@ -606,6 +611,12 @@ HRESULT CMpcAudioRenderer::SetMediaType(const CMediaType *pmt)
 
 	HRESULT hr = S_OK;
 
+	if (m_bDecodePcm) {
+		m_Atmos.Close();
+		m_bDecodePcm = false;
+		m_rtDecodePcmNext = INVALID_TIME;
+	}
+
 	AtmosLog(L"SetMediaType: format 0x%04x, %u channels, %u Hz%s", pwf->wFormatTag, pwf->nChannels, pwf->nSamplesPerSec,
 			 IsTrueHDBitstream(pwf) ? L" (TrueHD IEC 61937)" : IsEac3Bitstream(pwf) ? L" (E-AC-3 IEC 61937)" : L"");
 	const bool bTrueHD = IsObjectBitstream(pwf) && AtmosSupported(); // TrueHD or E-AC-3, decoded by thdatmos
@@ -682,6 +693,36 @@ HRESULT CMpcAudioRenderer::SetMediaType(const CMediaType *pmt)
 	}
 
 	hr = CheckAudioClient(pwf);
+	if (FAILED(hr) && IsObjectBitstream(pwf) && CAtmosOutput::LibraryAvailable()) {
+		// The device takes neither objects nor this bitstream (headphones, speakers, spatial sound off):
+		// decode here and play 7.1 float PCM through the normal WASAPI path (the mixer downmixes it).
+		AtmosLog(L"SetMediaType: %s bitstream refused by the device (0x%08x), decoding to PCM", IsEac3Bitstream(pwf) ? L"E-AC-3" : L"TrueHD", hr);
+		if (m_Atmos.OpenDecoder()) {
+			WAVEFORMATEXTENSIBLE wfx = {};
+			wfx.Format.wFormatTag      = WAVE_FORMAT_EXTENSIBLE;
+			wfx.Format.nChannels       = CAtmosOutput::PCM71_CHANNELS;
+			wfx.Format.nSamplesPerSec  = 48000;
+			wfx.Format.wBitsPerSample  = 32;
+			wfx.Format.nBlockAlign     = wfx.Format.nChannels * 4;
+			wfx.Format.nAvgBytesPerSec = wfx.Format.nSamplesPerSec * wfx.Format.nBlockAlign;
+			wfx.Format.cbSize          = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+			wfx.Samples.wValidBitsPerSample = 32;
+			wfx.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY
+								| SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT | SPEAKER_SIDE_LEFT | SPEAKER_SIDE_RIGHT;
+			wfx.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+			hr = CheckAudioClient(&wfx.Format);
+			if (SUCCEEDED(hr)) {
+				CopyWaveFormat(&wfx.Format, &m_pWaveFormatExInput);
+				m_BitstreamMode = BITSTREAM_NONE;
+				m_bDecodePcm = true;
+				m_rtDecodePcmNext = INVALID_TIME;
+				m_Atmos.SetEac3Gain(m_nEac3GainDb10 / 10.0f);
+				AtmosLog(L"SetMediaType: decoding to 7.1 float PCM for WASAPI");
+				return CBaseRenderer::SetMediaType(pmt);
+			}
+			m_Atmos.Close();
+		}
+	}
 	if (FAILED(hr)) {
 		AtmosLog(L"SetMediaType: CheckAudioClient failed (0x%08x), connection refused", hr);
 	}
@@ -906,7 +947,7 @@ STDMETHODIMP CMpcAudioRenderer::Run(REFERENCE_TIME rtStart)
 	if (m_bAtmos) {
 		ResetEvent(m_hAtmosAbort);
 		m_dVideoFps = DetectVideoFps();
-		AtmosLog(L"Run: Atmos playback, film %.3f fps, display sync %s", m_dVideoFps, m_bVideoSync ? L"on" : L"off");
+		AtmosLog(L"Run: spatial object output, film %.3f fps, display sync %s", m_dVideoFps, m_bVideoSync ? L"on" : L"off");
 		if (m_bVideoSync) {
 			m_VSync.Start();
 		}
@@ -1639,6 +1680,9 @@ HRESULT CMpcAudioRenderer::Transform(IMediaSample *pMediaSample)
 
 	if (m_bAtmos) {
 		return m_bSpatialPcm ? TransformSpatialPcm(pMediaSample) : TransformAtmos(pMediaSample);
+	}
+	if (m_bDecodePcm && !m_bPcmFeeding) {
+		return TransformDecodePcm(pMediaSample);
 	}
 
 	if (m_filterState == State_Stopped
@@ -3402,6 +3446,10 @@ HRESULT CMpcAudioRenderer::EndFlush()
 		m_Atmos.Flush();
 		ResetEvent(m_hAtmosAbort);
 	}
+	if (m_bDecodePcm) {
+		m_Atmos.Flush();
+		m_rtDecodePcmNext = INVALID_TIME;
+	}
 
 	HRESULT hr = CBaseRenderer::EndFlush();
 
@@ -4108,5 +4156,104 @@ HRESULT CMpcAudioRenderer::TransformAtmos(IMediaSample* pMediaSample)
 		m_rtLastReceivedSampleTimeEnd = rtStop;
 	}
 
+	return hr;
+}
+
+// A minimal IMediaSample over a memory block: the decoded PCM goes through the normal Transform().
+class CPcmMediaSample final : public IMediaSample
+{
+public:
+	CPcmMediaSample(BYTE* p, long len, REFERENCE_TIME start, REFERENCE_TIME stop, bool bDisc)
+		: m_p(p), m_len(len), m_start(start), m_stop(stop), m_bDisc(bDisc) {}
+
+	STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+		if (riid == IID_IUnknown || riid == IID_IMediaSample) {
+			*ppv = static_cast<IMediaSample*>(this);
+			return S_OK;
+		}
+		*ppv = nullptr;
+		return E_NOINTERFACE;
+	}
+	STDMETHODIMP_(ULONG) AddRef() override { return 2; }
+	STDMETHODIMP_(ULONG) Release() override { return 1; }
+	STDMETHODIMP GetPointer(BYTE** ppBuffer) override { *ppBuffer = m_p; return S_OK; }
+	STDMETHODIMP_(LONG) GetSize() override { return m_len; }
+	STDMETHODIMP GetTime(REFERENCE_TIME* pStart, REFERENCE_TIME* pEnd) override { *pStart = m_start; *pEnd = m_stop; return S_OK; }
+	STDMETHODIMP SetTime(REFERENCE_TIME*, REFERENCE_TIME*) override { return E_NOTIMPL; }
+	STDMETHODIMP IsSyncPoint() override { return S_OK; }
+	STDMETHODIMP SetSyncPoint(BOOL) override { return S_OK; }
+	STDMETHODIMP IsPreroll() override { return S_FALSE; }
+	STDMETHODIMP SetPreroll(BOOL) override { return S_OK; }
+	STDMETHODIMP_(LONG) GetActualDataLength() override { return m_len; }
+	STDMETHODIMP SetActualDataLength(LONG) override { return E_NOTIMPL; }
+	STDMETHODIMP GetMediaType(AM_MEDIA_TYPE** ppMediaType) override { *ppMediaType = nullptr; return S_FALSE; }
+	STDMETHODIMP SetMediaType(AM_MEDIA_TYPE*) override { return E_NOTIMPL; }
+	STDMETHODIMP IsDiscontinuity() override { return m_bDisc ? S_OK : S_FALSE; }
+	STDMETHODIMP SetDiscontinuity(BOOL) override { return S_OK; }
+	STDMETHODIMP GetMediaTime(LONGLONG*, LONGLONG*) override { return VFW_E_MEDIA_TIME_NOT_SET; }
+	STDMETHODIMP SetMediaTime(LONGLONG*, LONGLONG*) override { return E_NOTIMPL; }
+
+private:
+	BYTE* m_p;
+	long  m_len;
+	REFERENCE_TIME m_start, m_stop;
+	bool  m_bDisc;
+};
+
+HRESULT CMpcAudioRenderer::TransformDecodePcm(IMediaSample* pMediaSample)
+{
+	if (m_filterState == State_Stopped) {
+		return S_FALSE;
+	}
+
+	const long lSize = pMediaSample->GetActualDataLength();
+	if (!lSize) {
+		return S_FALSE;
+	}
+
+	REFERENCE_TIME rtStart, rtStop;
+	if (FAILED(pMediaSample->GetTime(&rtStart, &rtStop))) {
+		rtStart = rtStop = INVALID_TIME;
+	}
+	if (rtStart < 0 && rtStart != INVALID_TIME) {
+		return S_FALSE;
+	}
+
+	BYTE* pData = nullptr;
+	HRESULT hr = pMediaSample->GetPointer(&pData);
+	if (FAILED(hr)) {
+		return hr;
+	}
+	bool bDiscontinuity = (S_OK == pMediaSample->IsDiscontinuity());
+
+	std::vector<float> pcm;
+	uint32_t frames = 0;
+	if (!m_Atmos.DecodeToPcm71(pData, lSize, pcm, frames)) {
+		static int s_badLogged = 0;
+		if (s_badLogged++ < 3) {
+			AtmosLog(L"TransformDecodePcm: unrecognized burst (%ld bytes)", lSize);
+		}
+		return S_FALSE;
+	}
+	if (!frames) {
+		return S_OK; // decoder latency: no output yet
+	}
+
+	// Contiguous timeline from the decoded sample count, re-anchored on discontinuities and jumps.
+	if (rtStart == INVALID_TIME) {
+		rtStart = m_rtDecodePcmNext != INVALID_TIME ? m_rtDecodePcmNext : m_rtLastReceivedSampleTimeEnd;
+	}
+	if (m_rtDecodePcmNext == INVALID_TIME || bDiscontinuity || std::abs(rtStart - m_rtDecodePcmNext) > 500000) { // 50 ms
+		m_rtDecodePcmNext = rtStart;
+		bDiscontinuity = true;
+	}
+	const REFERENCE_TIME rtDuration = (REFERENCE_TIME)frames * UNITS / 48000;
+	const REFERENCE_TIME rtBegin = m_rtDecodePcmNext;
+	m_rtDecodePcmNext += rtDuration;
+
+	CPcmMediaSample sample((BYTE*)pcm.data(), (long)(pcm.size() * sizeof(float)), rtBegin, rtBegin + rtDuration, bDiscontinuity);
+	m_bPcmFeeding = true;
+	hr = Transform(&sample);
+	m_bPcmFeeding = false;
 	return hr;
 }
