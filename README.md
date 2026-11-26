@@ -1,6 +1,6 @@
 # MPC Audio Renderer with Atmos support
 
-Audio renderer for MPC-BE (fork of MPC Audio Renderer): decodes TrueHD Atmos and E-AC-3 Atmos on the PC and sends them as objects through Windows Spatial Sound (for use with Dolby Atmos for home theater or Atmos for headphones), with ReClock-style audio sync to the display refresh.
+Audio renderer for MPC-BE (fork of MPC Audio Renderer): decodes TrueHD Atmos and E-AC-3 Atmos through bitstreaming and sends them as objects through Windows Spatial Sound (for use with Dolby Atmos for home theater or Atmos for headphones), with ReClock-style audio sync to the display refresh.
 
 **Install**
 
