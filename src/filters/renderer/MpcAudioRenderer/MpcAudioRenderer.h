@@ -95,9 +95,13 @@ class __declspec(uuid("601D2A2B-9CDE-40bd-8650-0485E3522727"))
 	bool              IsEac3Bitstream(const WAVEFORMATEX* pwfx) const;
 	bool              IsObjectBitstream(const WAVEFORMATEX* pwfx) const;
 	bool              m_bSpatialPcm = false;  // spatial output fed with PCM (not TrueHD)
+	bool              m_bDecodePcm = false;   // TrueHD / E-AC-3 decoded to 7.1 float PCM (device refuses objects and bitstream)
+	bool              m_bPcmFeeding = false;
+	REFERENCE_TIME    m_rtDecodePcmNext = INVALID_TIME;
 	bool              IsHeightPcm(const WAVEFORMATEX* pwf) const;
 	bool              SpatialAvailable();
 	HRESULT           TransformSpatialPcm(IMediaSample* pMediaSample);
+	HRESULT           TransformDecodePcm(IMediaSample* pMediaSample);
 	CVSyncMeter       m_VSync;
 	double            m_dVideoFps = 0.0;
 	double            DetectVideoFps();
