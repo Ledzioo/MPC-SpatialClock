@@ -549,6 +549,134 @@ HRESULT CAtmosOutput::Receive(const BYTE* pData, long size, REFERENCE_TIME rtSta
 	return S_OK;
 }
 
+bool CAtmosOutput::OpenDecoder()
+{
+	Close();
+	m_pDecoder = LibraryAvailable() ? g_thd.create() : nullptr;
+	return m_pDecoder != nullptr;
+}
+
+// Position (room coordinates: x right, y front, z up) -> the 7.1 bed, pairwise constant-power panning.
+// Fixed channel order: FL FR FC LFE BL BR SL SR. Heights are folded into the bed (-3 dB at the top).
+static void Pan71(float x, float y, float z, float amp, float* out)
+{
+	constexpr float PI = 3.14159265f;
+	const float level = amp * (1.0f - 0.29f * std::min(std::max(z, 0.0f), 1.0f));
+	if (std::hypot(x, y) < 0.05f) { // straight above: front pair
+		out[0] += level * 0.70711f;
+		out[1] += level * 0.70711f;
+		return;
+	}
+	struct Node { float az; int ch; };
+	// Azimuth of the bed positions in the square room (FL = -45 deg ...).
+	static const Node ring[] = { { -135.0f, 4 }, { -90.0f, 6 }, { -45.0f, 0 }, { 0.0f, 2 }, { 45.0f, 1 }, { 90.0f, 7 }, { 135.0f, 5 } };
+	constexpr int n = 7;
+	const float az = std::atan2(x, y) * 180.0f / PI;
+	int i0, i1;
+	float t;
+	if (az >= ring[n - 1].az || az < ring[0].az) { // wrap segment, rear: BR -> BL
+		const float a = az < ring[0].az ? az + 360.0f : az;
+		i0 = n - 1;
+		i1 = 0;
+		t = (a - ring[n - 1].az) / (ring[0].az + 360.0f - ring[n - 1].az);
+	} else {
+		i0 = 0;
+		while (i0 + 2 < n && az >= ring[i0 + 1].az) {
+			i0++;
+		}
+		i1 = i0 + 1;
+		t = (az - ring[i0].az) / (ring[i1].az - ring[i0].az);
+	}
+	t = std::min(std::max(t, 0.0f), 1.0f);
+	out[ring[i0].ch] += level * std::cos(t * PI * 0.5f);
+	out[ring[i1].ch] += level * std::sin(t * PI * 0.5f);
+}
+
+bool CAtmosOutput::DecodeToPcm71(const BYTE* pData, long size, std::vector<float>& pcm, uint32_t& frames)
+{
+	pcm.clear();
+	frames = 0;
+	if (!m_pDecoder || !g_thd.push(m_pDecoder, pData, (size_t)size)) {
+		return false;
+	}
+
+	if (g_thd.info) {
+		const uint32_t info = g_thd.info(m_pDecoder);
+		if (info != m_nStreamInfo) {
+			AtmosLog(L"Decode: stream info 0x%x (bit0 TrueHD, bit1 E-AC-3, bit2 Atmos objects) -> PCM", info);
+		}
+		m_nStreamInfo = info;
+	}
+	const uint32_t info   = m_nStreamInfo.load();
+	const bool bFFmpeg    = (info & 2) && !(info & 4); // E-AC-3 without Atmos objects
+	const float fGain     = ((info & 2) && (info & 4)) ? m_fEac3Gain.load() : 1.0f;
+
+	std::vector<std::unique_ptr<Frame>> list;
+	{
+		auto f = std::make_unique<Frame>();
+		while (g_thd.pull(m_pDecoder, f.get()) == 1) {
+			if (bFFmpeg) {
+				continue;
+			}
+			if (fGain != 1.0f) {
+				for (uint32_t s = 0; s < f->samples && s < 160; s++) {
+					for (uint32_t c = 0; c < f->channels && c < 16; c++) {
+						f->pcm[s][c] *= fGain;
+					}
+				}
+			}
+			list.push_back(std::move(f));
+			f = std::make_unique<Frame>();
+		}
+	}
+	if (bFFmpeg) {
+		FFDecodeEac3(pData, size, list);
+	}
+
+	for (auto& fr : list) {
+		if (!fr->samples || !fr->sample_rate) {
+			continue;
+		}
+		uint32_t f = 1;
+		uint32_t n = fr->samples;
+		if (fr->sample_rate != SAMPLE_RATE) {
+			f = (fr->sample_rate + SAMPLE_RATE - 1) / SAMPLE_RATE; // integer decimation (96 -> 48 kHz...)
+			if (fr->sample_rate > 8 * SAMPLE_RATE || fr->sample_rate / f != SAMPLE_RATE) {
+				static int s_rateLogged = 0;
+				if (s_rateLogged++ < 3) {
+					AtmosLog(L"Decode: %u Hz is not supported by the PCM fallback (48 kHz and multiples only)", fr->sample_rate);
+				}
+				continue;
+			}
+			n = fr->samples / f;
+		}
+		const size_t base = pcm.size();
+		pcm.resize(base + (size_t)n * PCM71_CHANNELS, 0.0f);
+		for (uint32_t s = 0; s < n; s++) {
+			float* out = &pcm[base + (size_t)s * PCM71_CHANNELS];
+			for (uint32_t c = 0; c < fr->channels && c < 16; c++) {
+				const Element& e = fr->elements[c];
+				if (!e.active) {
+					continue;
+				}
+				float v = 0.0f;
+				for (uint32_t k = 0; k < f; k++) {
+					v += fr->pcm[s * f + k][c];
+				}
+				v = v / (float)f * e.gain;
+				if (e.kind == KIND_LFE) {
+					out[3] += v;
+				} else {
+					Pan71(e.x, e.y, e.z, v, out);
+				}
+			}
+		}
+		frames += n;
+	}
+
+	return true;
+}
+
 void CAtmosOutput::QueueResampled(std::unique_ptr<Frame>& frame, REFERENCE_TIME rtStart, bool& bDiscontinuity)
 {
 	const uint32_t ch = std::min<uint32_t>(frame->channels, 16);
