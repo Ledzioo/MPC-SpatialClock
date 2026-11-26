@@ -1,6 +1,6 @@
 # MPC Audio Renderer with Atmos to Windows Spatial API
 
-Audio renderer for MPC video players (fork of MPC Audio Renderer): bitstreams and decodes TrueHD Atmos and E-AC-3 Atmos, then sends them as objects through Windows Spatial Sound (for use with Dolby Atmos for home theater or Atmos for headphones), with ReClock-style audio sync to the display refresh.
+Audio renderer for MPC video players (fork of MPC Audio Renderer): bitstreams and decodes TrueHD Atmos and E-AC-3 Atmos, then sends them as objects through Windows Spatial Sound (for use with Atmos for Headphones, DTS:X), with ReClock-style audio sync to the display refresh.
 
 **Install**
 
