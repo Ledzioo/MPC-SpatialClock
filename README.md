@@ -7,7 +7,7 @@ Audio renderer for MPC-BE (fork of MPC Audio Renderer): decodes TrueHD Atmos and
 1. Unzip the folder somewhere permanent.
 2. Right-click `Installer.bat` → Run as administrator.
 3. MPC-BE: Options → Audio → Audio renderer: "MPC SpatialClock (external)".
-4. MPC-BE audio decoder: TrueHD and E-AC-3 pass-through ON, DTS and AC-3 OFF. Note: For MPC-HC, disable PCM fallback when bitstreaming is unavailable.
+4. MPC-BE audio decoder: TrueHD and E-AC-3 pass-through ON, DTS and AC-3 OFF. Note: For MPC-HC with LAV audio decoder, disable PCM fallback when bitstreaming is unavailable.
 5. Windows: HDMI output → Spatial sound → "Dolby Atmos for home theater".
 
 To remove it: `Uninstaller.bat`, as administrator.
