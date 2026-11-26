@@ -72,6 +72,12 @@ public:
 	void SetVolume(float volume);     // global linear gain
 	void SetEac3Gain(float dB);        // level trim for E-AC-3 Atmos (objects) only
 
+	// Decode-only mode (no spatial stream): TrueHD / E-AC-3 decoded to 8-channel (7.1) float PCM at 48 kHz,
+	// for the normal WASAPI path when the device cannot play objects or the bitstream.
+	static constexpr uint32_t PCM71_CHANNELS = 8; // FL FR FC LFE BL BR SL SR
+	bool OpenDecoder();
+	bool DecodeToPcm71(const BYTE* pData, long size, std::vector<float>& pcm, uint32_t& frames);
+
 	// Playback speed (1.0 = normal), applied by resampling.
 	void   SetSpeed(double speed);
 	double GetSpeed();
